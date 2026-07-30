@@ -219,7 +219,7 @@ def webapp_columns(analysis_id, webapp_id):
         return jsonify({"error": "Unknown webapp_id"}), 404
 
     needed = classify_needed_columns_for_webapp(webapp)
-    summary = {"needed": len(needed), "satisfied": 0, "available_elsewhere": 0, "available_ambiguous": 0, "derivable": 0, "missing": 0}
+    summary = {"needed": len(needed), "satisfied": 0, "available_elsewhere": 0, "missing": 0}
     for col in needed:
         summary[col.state.value] += 1
 

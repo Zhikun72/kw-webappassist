@@ -25,10 +25,9 @@ REQUIRED_COLS_PAIRING_WINDOW = 100  # lines a required_cols check may trail its 
 
 _STATE_RANK = {
     ColumnState.MISSING: 0,
-    ColumnState.AVAILABLE_AMBIGUOUS: 1,
-    ColumnState.AVAILABLE_ELSEWHERE: 2,
-    ColumnState.DERIVABLE: 3,
-    ColumnState.SATISFIED: 4,
+    ColumnState.AVAILABLE_ELSEWHERE: 1,
+    ColumnState.DERIVABLE: 2,
+    ColumnState.SATISFIED: 3,
 }
 
 
@@ -62,29 +61,14 @@ def classify_column(
     column_index: dict[str, list[str]],
     migration_hint_dataset: str | None,
     section_id: str,
-    markers: dict,
 ) -> NeededColumn:
     """Tier 1 classification: SATISFIED if it's in the dataset this section
-    actually reads; else AVAILABLE_ELSEWHERE/AVAILABLE_AMBIGUOUS if it
-    exists in some other real dataset by name (normalized); else MISSING.
-    `column_index` already maps normalized name -> owning dataset names, so
-    both checks are O(1) lookups against the same structure.
-
-    A bare name match against every dataset in the project is not the same
-    thing as a trustworthy join candidate - `日付_Month` matches ~100
-    datasets by exact name, which is name-collision, not signal. Confident
-    AVAILABLE_ELSEWHERE requires either a small match count, or the mock's
-    own migration-hint dataset among the matches (an explicit anchor); a
-    wide match count with no anchor downgrades to AVAILABLE_AMBIGUOUS -
-    visible, but never presented as a clean match, and never on the
-    "request from client" list. Displayed `source_datasets` is capped
-    (`available_elsewhere_max_sources_shown`) with the intended source
-    placed first when present; `candidate_count` always records the true,
-    uncapped match count."""
+    actually reads; AVAILABLE_ELSEWHERE if it exists in some other real
+    dataset by name (normalized); else MISSING. `column_index` already maps
+    normalized name -> owning dataset names, so both checks are O(1)
+    lookups against the same structure."""
     normalized = normalize_column_name(field.name)
     sources = column_index.get(normalized, [])
-    ambiguous_threshold = markers.get("available_elsewhere_ambiguous_threshold", 5)
-    max_shown = markers.get("available_elsewhere_max_sources_shown", 5)
 
     if matched_dataset and matched_dataset.name in sources:
         return NeededColumn(
@@ -93,26 +77,17 @@ def classify_column(
             state=ColumnState.SATISFIED,
             usage=field.usage,
             source_datasets=[matched_dataset.name],
-            candidate_count=1,
             in_intended_source=False,
             requested_by=[section_id],
         )
     if sources:
-        in_intended = bool(migration_hint_dataset) and migration_hint_dataset in sources
-        ordered = [migration_hint_dataset] + [s for s in sources if s != migration_hint_dataset] if in_intended else sources
-        state = (
-            ColumnState.AVAILABLE_ELSEWHERE
-            if (in_intended or len(sources) <= ambiguous_threshold)
-            else ColumnState.AVAILABLE_AMBIGUOUS
-        )
         return NeededColumn(
             name=field.name,
             description=field.description,
-            state=state,
+            state=ColumnState.AVAILABLE_ELSEWHERE,
             usage=field.usage,
-            source_datasets=ordered[:max_shown],
-            candidate_count=len(sources),
-            in_intended_source=in_intended,
+            source_datasets=sources,
+            in_intended_source=bool(migration_hint_dataset) and migration_hint_dataset in sources,
             requested_by=[section_id],
         )
     return NeededColumn(
@@ -121,14 +96,13 @@ def classify_column(
         state=ColumnState.MISSING,
         usage=field.usage,
         source_datasets=[],
-        candidate_count=0,
         in_intended_source=False,
         requested_by=[section_id],
     )
 
 
 def build_sections_for_webapp(
-    webapp: Webapp, scan_result: dict, datasets: dict[str, Dataset], column_index: dict[str, list[str]], markers: dict
+    webapp: Webapp, scan_result: dict, datasets: dict[str, Dataset], column_index: dict[str, list[str]]
 ) -> list[WebappSection]:
     sections: list[WebappSection] = []
     real_reads = scan_result["real_reads"]
@@ -140,7 +114,7 @@ def build_sections_for_webapp(
         decl_fields = pairing.get(idx, [])
         section_id = f"read-{read.dataset_name}-{read.line_no}"
 
-        column_states = [classify_column(f, matched, column_index, None, section_id, markers) for f in decl_fields]
+        column_states = [classify_column(f, matched, column_index, None, section_id) for f in decl_fields]
         satisfied_count = sum(1 for c in column_states if c.state == ColumnState.SATISFIED)
         total_count = len(column_states)
 
@@ -178,7 +152,7 @@ def build_sections_for_webapp(
         data_fields = [f for f in block.required_fields if f.kind == FieldKind.DATA]
         non_data_fields = [f for f in block.required_fields if f.kind != FieldKind.DATA]
         column_states = [
-            classify_column(f, None, column_index, block.migration_hint_dataset, section_id, markers) for f in data_fields
+            classify_column(f, None, column_index, block.migration_hint_dataset, section_id) for f in data_fields
         ]
         sections.append(
             WebappSection(
@@ -217,7 +191,6 @@ def classify_needed_columns_for_webapp(webapp: Webapp) -> list[NeededColumn]:
                     state=col.state,
                     usage=col.usage,
                     source_datasets=list(col.source_datasets),
-                    candidate_count=col.candidate_count,
                     in_intended_source=col.in_intended_source,
                     requested_by=list(col.requested_by),
                 )
@@ -231,7 +204,6 @@ def classify_needed_columns_for_webapp(webapp: Webapp) -> list[NeededColumn]:
             if _STATE_RANK[col.state] > _STATE_RANK[existing.state]:
                 existing.state = col.state
                 existing.source_datasets = list(col.source_datasets)
-                existing.candidate_count = col.candidate_count
                 existing.in_intended_source = col.in_intended_source
 
     return sorted(merged.values(), key=lambda c: c.name)

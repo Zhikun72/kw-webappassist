@@ -47,7 +47,7 @@ def test_partial_state_when_some_required_columns_missing():
     class FakeWebapp:
         id = "w1"
 
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index, MARKERS)
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
     assert len(sections) == 1
     section = sections[0]
     assert section.state == SectionState.PARTIAL
@@ -68,7 +68,7 @@ def test_referenced_missing_when_dataset_absent():
     class FakeWebapp:
         id = "w1"
 
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index, MARKERS)
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
     assert sections[0].state == SectionState.REFERENCED_MISSING
     assert sections[0].matched_dataset is None
 
@@ -86,7 +86,7 @@ def test_ready_when_all_required_columns_present():
     class FakeWebapp:
         id = "w1"
 
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index, MARKERS)
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
     assert sections[0].state == SectionState.READY
 
 
@@ -105,7 +105,7 @@ def test_mock_section_field_classified_available_elsewhere_with_intended_source_
     class FakeWebapp:
         id = "w1"
 
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index, MARKERS)
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
     assert sections[0].state == SectionState.MOCK
     col = sections[0].column_states[0]
     assert col.state == ColumnState.AVAILABLE_ELSEWHERE
@@ -127,7 +127,7 @@ def test_mock_section_field_missing_when_nowhere_in_project():
     class FakeWebapp:
         id = "w1"
 
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index, MARKERS)
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
     assert sections[0].column_states[0].state == ColumnState.MISSING
 
 
@@ -148,7 +148,7 @@ def test_classify_needed_columns_for_webapp_dedupes_and_tracks_requesters():
         sections = []
 
     webapp = FakeWebapp()
-    webapp.sections = build_sections_for_webapp(webapp, scan_result, DATASETS, column_index, MARKERS)
+    webapp.sections = build_sections_for_webapp(webapp, scan_result, DATASETS, column_index)
     needed = classify_needed_columns_for_webapp(webapp)
 
     region_cols = [c for c in needed if c.name == "region"]
@@ -177,57 +177,9 @@ def test_render_and_uncertain_fields_excluded_from_fill_ability_analysis():
     class FakeWebapp:
         id = "w1"
 
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index, MARKERS)
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
     section = sections[0]
 
     assert section.total_count == 1
     assert [c.name for c in section.column_states] == ["region"]
     assert {f.name for f in section.non_data_fields} == {"chart_label", "ambiguous_key"}
-
-
-# Six datasets all declaring "widecol" - a name-collision scenario: matching
-# this many datasets by exact name with no anchor is noise, not a
-# trustworthy join candidate (default available_elsewhere_ambiguous_threshold is 5).
-_WIDE_DATASETS = {
-    f"DS_{i}": Dataset(name=f"DS_{i}", type="Snowflake", columns=[Column(name="widecol", type="string")]) for i in range(6)
-}
-
-
-def test_wide_name_match_with_no_anchor_downgrades_to_available_ambiguous():
-    column_index = build_column_index(_WIDE_DATASETS)
-    mock_block = MockBlock(
-        id="mock-wide", title="Wide match", start_line=1, end_line=5,
-        required_fields=[DeclaredField(name="widecol", description=None, source_line=2)],
-    )
-    scan_result = _scan_result_for(mock_blocks=[mock_block])
-
-    class FakeWebapp:
-        id = "w1"
-
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, _WIDE_DATASETS, column_index, MARKERS)
-    col = sections[0].column_states[0]
-
-    assert col.state == ColumnState.AVAILABLE_AMBIGUOUS
-    assert col.candidate_count == 6
-    assert len(col.source_datasets) <= MARKERS["available_elsewhere_max_sources_shown"]
-
-
-def test_wide_name_match_with_intended_source_anchor_stays_available_elsewhere():
-    column_index = build_column_index(_WIDE_DATASETS)
-    mock_block = MockBlock(
-        id="mock-wide-anchored", title="Wide match, anchored", start_line=1, end_line=5,
-        migration_hint_dataset="DS_3",
-        required_fields=[DeclaredField(name="widecol", description=None, source_line=2)],
-    )
-    scan_result = _scan_result_for(mock_blocks=[mock_block])
-
-    class FakeWebapp:
-        id = "w1"
-
-    sections = build_sections_for_webapp(FakeWebapp(), scan_result, _WIDE_DATASETS, column_index, MARKERS)
-    col = sections[0].column_states[0]
-
-    assert col.state == ColumnState.AVAILABLE_ELSEWHERE
-    assert col.in_intended_source is True
-    assert col.source_datasets[0] == "DS_3"
-    assert col.candidate_count == 6
