@@ -201,6 +201,19 @@ def webapp_detail(analysis_id, webapp_id):
     )
 
 
+@app.route("/api/analyses/<analysis_id>/datasets/<dataset_name>")
+def dataset_detail(analysis_id, dataset_name):
+    bundle = _get_analysis(analysis_id)
+    if not bundle:
+        return jsonify({"error": "Unknown analysis_id"}), 404
+
+    dataset = bundle["project"].datasets.get(dataset_name)
+    if not dataset:
+        return jsonify({"error": "Unknown dataset"}), 404
+
+    return jsonify(to_dict(dataset))
+
+
 @app.route("/api/analyses/<analysis_id>/inventory")
 def inventory_view(analysis_id):
     bundle = _get_analysis(analysis_id)
@@ -252,4 +265,9 @@ def derivability(analysis_id, webapp_id, section_id):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=int(os.environ.get("PORT", 5000)))
+    # use_reloader=False: the debug auto-reloader pulls in `watchdog`, whose
+    # API has drifted across versions in ways that break Werkzeug's reloader
+    # on some environments (e.g. a stale watchdog in a shared anaconda base
+    # env). Debug mode (tracebacks, auto server errors) still works fine
+    # without it; you just restart manually after editing backend code.
+    app.run(debug=True, use_reloader=False, port=int(os.environ.get("PORT", 5000)))

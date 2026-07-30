@@ -188,6 +188,15 @@
     const upstream = upstreamOf(node.id);
     Panels.renderNodeDetail(el.drawer, node, { readers, upstream });
     Graph.focusNode(node.id);
+
+    if (node.known_dataset) {
+      Api.dataset(state.analysisId, node.id)
+        .then((ds) => Panels.renderNodeColumns(el.drawer, ds.columns))
+        .catch(() => Panels.renderNodeColumns(el.drawer, []));
+    } else {
+      const placeholder = el.drawer.querySelector("#node-columns-list");
+      if (placeholder) placeholder.textContent = "Not a recognized project dataset (likely a saved model / other recipe I/O, not a schema-bearing dataset).";
+    }
   }
 
   function upstreamOf(datasetId) {

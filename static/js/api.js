@@ -24,6 +24,9 @@ const Api = (() => {
     async webapp(analysisId, webappId) {
       return _json(await fetch(`/api/analyses/${analysisId}/webapps/${webappId}`));
     },
+    async dataset(analysisId, datasetName) {
+      return _json(await fetch(`/api/analyses/${analysisId}/datasets/${encodeURIComponent(datasetName)}`));
+    },
     async inventory(analysisId) {
       return _json(await fetch(`/api/analyses/${analysisId}/inventory`));
     },

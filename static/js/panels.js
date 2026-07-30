@@ -160,12 +160,23 @@ const Panels = (() => {
       <div class="drawer__body">
         <p><strong>Type:</strong> ${escapeHtml(node.type)} ${node.terminal ? " &middot; terminal (delivery surface)" : ""}</p>
         <p><strong>Zone:</strong> ${escapeHtml(node.zone_name || "(none)")}</p>
-        <p><strong>Columns:</strong> ${node.column_count}</p>
         <p><strong>In / Out degree:</strong> ${node.in_degree} / ${node.out_degree}</p>
         ${readers.length ? `<p><strong>Read by:</strong> ${readers.map(escapeHtml).join(", ")}</p>` : `<p style="color:var(--text-muted)">Not read by any webapp (built-unused).</p>`}
         ${upstream.length ? `<p><strong>Upstream lineage:</strong> ${upstream.slice(0, 12).map(escapeHtml).join(" &larr; ")}</p>` : ""}
+        <p><strong>Columns (${node.column_count}):</strong></p>
+        <div class="snippet mono" id="node-columns-list">Loading columns&hellip;</div>
       </div>
     `;
+  }
+
+  function renderNodeColumns(host, columns) {
+    const target = host.querySelector("#node-columns-list");
+    if (!target) return;
+    if (!columns.length) {
+      target.textContent = "(no columns declared)";
+      return;
+    }
+    target.textContent = columns.map((c) => `${c.name}  :  ${c.type}`).join("\n");
   }
 
   function escapeHtml(s) {
@@ -180,5 +191,6 @@ const Panels = (() => {
     renderDerivabilityResult,
     renderReadDetail,
     renderNodeDetail,
+    renderNodeColumns,
   };
 })();
