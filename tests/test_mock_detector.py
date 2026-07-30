@@ -29,6 +29,40 @@ def _mock_kind_data():
     return pd.DataFrame(rows)
 '''
 
+# v3: derived intermediates, config/manual constant-value tracing, and the
+# "be conservative" clause (a leading-underscore name built directly into
+# the dataframe still counts as a real column).
+V3_SOURCE = '''
+import pandas as pd
+from flask import jsonify
+
+RATE_THRESHOLD = 12.5
+PLACEHOLDER_NOTES = ["first note", "second note"]
+
+# ============================================================
+# V3 Classification - MOCK DATA
+# ============================================================
+def v3_view():
+    df = _mock_v3_data()
+    payload = {
+        "my_rate_threshold": RATE_THRESHOLD,
+        "notes": PLACEHOLDER_NOTES,
+        "computed_threshold": [RATE_THRESHOLD] * 3,
+        "total": df["amount"].sum(),
+    }
+    return jsonify(payload)
+
+
+def _mock_v3_data():
+    rows = []
+    for i in range(2):
+        rows.append({"amount": i, "_special_col": i * 2})
+    df = pd.DataFrame(rows)
+    df["_year"] = df["amount"]
+    df["_special_col"] = df["_special_col"] * 2
+    return df
+'''
+
 BACKEND_SOURCE = '''
 import dataiku
 import pandas as pd
@@ -176,3 +210,49 @@ def test_required_cols_fields_are_always_data_kind():
     result = scan_backend(BACKEND_SOURCE, MARKERS)
     checks = result["required_cols_checks"]
     assert all(f.kind == FieldKind.DATA for f in checks[0].fields)
+
+
+def _v3_fields():
+    result = scan_backend(V3_SOURCE, MARKERS)
+    block = next(b for b in result["mock_blocks"] if "_mock_v3_data" in b.mock_functions)
+    return {f.name: f for f in block.required_fields}
+
+
+def test_leading_underscore_subscript_only_name_is_derived():
+    """work["_year"] = ... with no dataframe-constructor evidence is a
+    locally-computed intermediate, not a field to source from anywhere."""
+    fields = _v3_fields()
+    assert fields["_year"].kind == FieldKind.DERIVED
+    assert fields["_year"].usage == "post-construction column assignment"
+
+
+def test_leading_underscore_name_built_into_dataframe_stays_data():
+    """The 'be conservative' clause: a leading-underscore name that IS built
+    directly into the mock's own dataframe-constructor dict is a real
+    column regardless of naming convention - never downgraded to derived."""
+    fields = _v3_fields()
+    assert fields["_special_col"].kind == FieldKind.DATA
+
+
+def test_dict_value_referencing_threshold_constant_is_config():
+    """A dict key whose value is a bare reference to a *_THRESHOLD-named
+    numeric constant is a business parameter, not a data gap - even though
+    it's also inside a jsonify payload (config is a more specific reading
+    of render, not a conflict with it)."""
+    fields = _v3_fields()
+    assert fields["my_rate_threshold"].kind == FieldKind.CONFIG
+    assert "config constant reference" in fields["my_rate_threshold"].usage
+
+
+def test_dict_value_referencing_placeholder_constant_is_manual():
+    fields = _v3_fields()
+    assert fields["notes"].kind == FieldKind.MANUAL
+    assert "manual/placeholder constant reference" in fields["notes"].usage
+
+
+def test_computed_expression_over_constant_is_not_traced():
+    """[RATE_THRESHOLD] * 3 is a computed expression, not a bare Name -
+    deliberately not traced into config/manual; stays whatever its
+    containing dict's context already implies (here: plain render)."""
+    fields = _v3_fields()
+    assert fields["computed_threshold"].kind == FieldKind.RENDER

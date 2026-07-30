@@ -20,7 +20,8 @@ from backend.models import ColumnState, Project
 # Counts of section-level column_states already exclude non-data fields (see
 # backend/inventory.py build_sections_for_webapp), so "data" is always the
 # field_kind for anything carrying a ColumnState.
-_SUMMARY_KEYS = ("satisfied", "available_elsewhere", "derivable", "missing")
+_SUMMARY_KEYS = ("satisfied", "available_elsewhere", "available_ambiguous", "derivable", "missing")
+_NON_DATA_KINDS = ("render", "config", "manual", "derived", "uncertain")
 
 
 def _cached_derivable_hit(derivability_cache: dict, webapp_id: str, section_id: str, field_name: str):
@@ -65,6 +66,7 @@ def build_export(project: Project, derivability_cache: dict) -> dict:
                     "state": state.value,
                     "source_dataset": source_dataset,
                     "all_source_datasets": list(col.source_datasets),
+                    "candidate_count": col.candidate_count,
                     "intended_source": intended_source,
                     "description": col.description,
                     "usage": col.usage,
@@ -85,6 +87,7 @@ def build_export(project: Project, derivability_cache: dict) -> dict:
                         "state": None,
                         "source_dataset": None,
                         "all_source_datasets": [],
+                        "candidate_count": 0,
                         "intended_source": intended_source,
                         "description": f.description,
                         "usage": f.usage,
@@ -108,7 +111,12 @@ def build_export(project: Project, derivability_cache: dict) -> dict:
             display_names.setdefault(key, col.name)
             matrix_data.setdefault(key, {})[webapp.id] = effective_state.value
 
-        summary["non_data_excluded"] = sum(len(s.non_data_fields) for s in webapp.sections)
+        non_data_breakdown = {kind: 0 for kind in _NON_DATA_KINDS}
+        for s in webapp.sections:
+            for f in s.non_data_fields:
+                non_data_breakdown[f.kind.value] += 1
+        summary["non_data_breakdown"] = non_data_breakdown
+        summary["non_data_excluded"] = sum(non_data_breakdown.values())
         summary["webapp"] = webapp.name
         webapp_summaries[webapp.id] = summary
 
@@ -130,17 +138,28 @@ def build_export(project: Project, derivability_cache: dict) -> dict:
 def render_markdown(export: dict) -> str:
     lines = ["# Fill-ability Triage Export", "", "## Per-webapp summary (data fields only)", ""]
     for webapp_id, summary in export["webapp_summaries"].items():
+        breakdown = summary["non_data_breakdown"]
+        breakdown_str = ", ".join(f"{count} {kind}" for kind, count in breakdown.items() if count)
         lines.append(
             f"- **{summary['webapp']}** (`{webapp_id}`): {summary['needed']} data fields needed - "
             f"{summary['satisfied']} satisfied, {summary['available_elsewhere']} available elsewhere, "
-            f"{summary['derivable']} derivable, {summary['missing']} missing "
-            f"({summary['non_data_excluded']} render/uncertain fields excluded from this count)"
+            f"{summary['available_ambiguous']} ambiguous match, {summary['derivable']} derivable, "
+            f"{summary['missing']} missing "
+            f"({summary['non_data_excluded']} non-data fields excluded from this count"
+            f"{': ' + breakdown_str if breakdown_str else ''})"
         )
 
     missing_by_field: dict[str, list[str]] = {}
+    ambiguous_by_field: dict[str, list[str]] = {}
     for record in export["fields"]:
-        if record["field_kind"] == "data" and record["state"] == "missing":
+        if record["field_kind"] != "data":
+            continue
+        if record["state"] == "missing":
             missing_by_field.setdefault(record["field"], []).append(f"{record['webapp']} / {record['section']}")
+        elif record["state"] == "available_ambiguous":
+            ambiguous_by_field.setdefault(record["field"], []).append(
+                f"{record['webapp']} / {record['section']} ({record['candidate_count']} datasets match by name)"
+            )
 
     lines += ["", "## Request from client (genuine data gaps)", ""]
     if not missing_by_field:
@@ -149,5 +168,11 @@ def render_markdown(export: dict) -> str:
         for field_name in sorted(missing_by_field):
             requesters = ", ".join(sorted(set(missing_by_field[field_name])))
             lines.append(f"- **{field_name}** - needed by: {requesters}")
+
+    if ambiguous_by_field:
+        lines += ["", "## Needs confirmation (ambiguous name match - not a data gap, not a confident join either)", ""]
+        for field_name in sorted(ambiguous_by_field):
+            requesters = "; ".join(sorted(set(ambiguous_by_field[field_name])))
+            lines.append(f"- **{field_name}** - {requesters}")
 
     return "\n".join(lines)

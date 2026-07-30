@@ -41,7 +41,7 @@ def analyze_zip(zip_path: Path, work_dir: Path, markers: dict) -> tuple[Project,
     if layout.web_apps_dir:
         webapps, scan_results = parse_webapps(layout.web_apps_dir, markers)
         for webapp in webapps:
-            webapp.sections = build_sections_for_webapp(webapp, scan_results[webapp.id], project.datasets, column_index)
+            webapp.sections = build_sections_for_webapp(webapp, scan_results[webapp.id], project.datasets, column_index, markers)
         project.webapps = webapps
     else:
         project.discovery_warnings.append("No web_apps/ directory found - nothing to inventory.")

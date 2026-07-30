@@ -16,20 +16,31 @@ for the structural discovery pass this build was validated against.
 
 ## What it answers
 
-- **Data-vs-render field classification**: a mock block's declared fields
-  are classified `data` / `render` / `uncertain` *by position* (does it
-  touch a dataframe/dataset, or only ever sit inside a `jsonify(...)`
-  response payload) before anything else - never by name, since the same
-  name (`value`, `label`) genuinely plays both roles in different places.
-  Only `data` fields get scored for fill-ability, so a section's "missing"
-  count reflects genuine data gaps, not JSON response scaffolding.
+- **Six-way field classification, by position, never by name**: a mock
+  block's declared fields are classified `data` / `render` / `derived` /
+  `config` / `manual` / `uncertain` before anything else - the same name
+  (`value`, `label`) genuinely plays different roles in different places, so
+  classification looks at *where* a name is used, not what it's called.
+  Only `data` fields get scored for fill-ability:
+  - `render` - a pure JSON response key, never touches a dataframe.
+  - `derived` - a locally-computed intermediate (`work["_year"] = work[DATE_COL]
+    .dt.year`), not something to source from anywhere.
+  - `config` - a business threshold/parameter constant (`WAPE_THRESHOLD = 11.0`) -
+    needs validation, not data acquisition.
+  - `manual` - free-text/editorial placeholder content (`PLACEHOLDER_KEY_INSIGHTS`) -
+    needs authoring, not data acquisition.
+  - `uncertain` - conflicting or absent evidence, flagged rather than guessed.
 - **Three/four-state inventory per webapp section**: Ready, Partial (some
   required columns missing), Mock/to-build, Referenced-missing.
 - **Column-level gap analysis**: every *data* column a webapp needs - from a
   real `required_cols` check or from a mock block's own field construction -
   is cross-referenced against the *whole project's* schemas (not just the
   one dataset a section happens to read), classified Satisfied /
-  Available-elsewhere / Derivable / Missing.
+  Available-elsewhere / Available-ambiguous / Derivable / Missing. A name
+  match against more datasets than a configurable threshold, with no
+  migration-hint anchor naming one of them, downgrades to
+  `available_ambiguous` (name-collision, not a trustworthy join candidate)
+  rather than being presented as a confident match.
 - **Mock gap cards**: click a mock section to see its declared fields, their
   state, the intended migration source (if the code names one) and whether
   it actually exists in the project, plus an LLM-backed derivability check
@@ -81,7 +92,8 @@ zip upload
                                      always data-kind by construction)
                                    - banner/keyword/migration-hint mock blocks
                                    - each mock block's own declared fields (AST),
-                                     classified data/render/uncertain by position
+                                     classified data/render/derived/config/manual/
+                                     uncertain by position
   -> backend/column_matching.py normalize + index every column name project-wide
   -> backend/inventory.py       cross-reference sections + columns -> states
                                    (data fields only; render/uncertain tracked
@@ -103,9 +115,14 @@ require editing that file.
 - [`config/markers.yaml`](config/markers.yaml) - mock-detection banners,
   keywords, function-name patterns, migration-hint patterns, the
   `required_cols` variable-name patterns, a small denylist for boilerplate
-  dict keys (e.g. the standard Flask `{"error": str(e)}` pattern), and the
+  dict keys (e.g. the standard Flask `{"error": str(e)}` pattern), the
   `dataframe_constructor_names` / `response_wrapper_names` call-name lists
-  that drive data-vs-render field classification.
+  that drive data-vs-render field classification, `derived_field_name_patterns`
+  (locally-computed intermediates), `config_constant_name_patterns` /
+  `manual_constant_name_patterns` (business-parameter vs. editorial-content
+  constants), and `available_elsewhere_ambiguous_threshold` /
+  `available_elsewhere_max_sources_shown` (when a name match is too wide to
+  trust).
 - `.env` (copy from `.env.example`): `GEMINI_API_KEY`, `GEMINI_MODEL`,
   `FLASK_SECRET_KEY`, `UPLOAD_DIR`.
 
@@ -135,39 +152,52 @@ upload - this is a local single-operator tool, not a multi-tenant service.
 Covers mock detection (banner/keyword/migration-hint parsing, the
 comment-scoping that prevents UI strings like `placeholder="..."` from
 false-positiving as mock markers, and declared-field extraction), the
-data/render/uncertain field-kind classification (including the real
-project's own ambiguity - the same field name used as a dataframe column in
-one function and a jsonify key in a sibling function must resolve to
-`uncertain`, not silently either way), constant resolution, flow graph
+six-way field-kind classification (including the real project's own
+ambiguity - the same field name used as a dataframe column in one function
+and a jsonify key in a sibling function must resolve to `uncertain`, not
+silently either way; a leading-underscore name built directly into a
+dataframe stays `data` rather than being downgraded to `derived`; a
+`*_THRESHOLD`-named constant referenced inside a jsonify payload resolves
+`config`, not a data/render conflict), constant resolution, flow graph
 terminal/lineage calculation, column-name normalization and matching, the
-column-level state classification (Satisfied/Available-elsewhere/Missing,
-Partial section state), and the export builder (field record shape,
-webapp/cross-webapp summaries, cached-derivable state surfacing).
+column-level state classification (Satisfied/Available-elsewhere/
+Available-ambiguous/Missing, Partial section state), and the export builder
+(field record shape, non-data breakdown by kind, webapp/cross-webapp
+summaries, cached-derivable state surfacing).
 
 ## Known limitations
 
 - **Field extraction is still permissive at the dict-literal level** - every
-  dict key inside a mock block's owning function(s) is a extraction
-  candidate. The data/render/uncertain classification gate removes JSON
-  response scaffolding from the fill-ability counts, but genuinely
-  ambiguous keys (a lookup/config dict never passed to `DataFrame`/
-  `jsonify`, or a value built by a helper function that itself doesn't
-  directly touch either) land in `uncertain` rather than being guessed -
-  by design, not a bug, but it means `uncertain` needs a human glance.
+  dict key inside a mock block's owning function(s) is an extraction
+  candidate. The six-way classification gate removes JSON response
+  scaffolding, intermediates, config constants, and placeholder text from
+  the fill-ability counts, but genuinely ambiguous keys (a lookup dict never
+  passed to `DataFrame`/`jsonify`, or a value built by a helper function
+  that itself doesn't directly touch either) land in `uncertain` rather
+  than being guessed - by design, not a bug, but it means `uncertain` needs
+  a human glance.
 - **Classification has no interprocedural tracing.** A dict returned by a
   helper function that's later passed to `jsonify`/`DataFrame` by its
   *caller* isn't traced back into that helper - only within one function
   (or the handful of functions a mock block directly spans) is a dict's
-  origin resolved. This is a deliberate scope boundary (full data-flow
-  analysis is a much larger undertaking), not an oversight.
+  origin resolved. Config/manual detection is similarly conservative: only
+  a bare `NAME` reference to a module-level constant is traced, not a
+  computed expression over one (e.g. `[WAPE_THRESHOLD] * len(periods)`).
+  Both are deliberate scope boundaries (full data-flow analysis is a much
+  larger undertaking), not oversights.
 - **Column matching is Tier 1 only**: exact name matching after NFKC
   normalization (trim/case/full-width-half-width). No recipe-level column
   lineage yet (Tier 2 - tracing which join/grouping/shaker step actually
   produces a column). `derivable` in the export only ever reflects an
   already-cached LLM check (the derivability button) - export itself never
-  triggers a new LLM call.
+  triggers a new LLM call. `available_ambiguous` only flags a match as
+  untrustworthy by volume - it doesn't attempt join-key/granularity
+  resolution, which also needs Tier 2 lineage.
 - **No row-level profiling** (missing-rate, distributions, samples) unless
   the export actually contains dataset data - this build targets
   metadata/schema-only exports per the spec.
-- Left-panel-to-graph lineage highlighting and a terminal-only view of
-  built-unused datasets are designed but not yet built.
+- Left-panel-to-graph lineage highlighting, a terminal-only view of
+  built-unused datasets, and extending mock-block detection to sections
+  that mix real+dummy content without a banner marker (found while building
+  this - such a section is currently invisible to the pipeline entirely,
+  independent of the classification fixes above) are not yet built.

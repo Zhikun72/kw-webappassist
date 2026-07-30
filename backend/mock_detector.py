@@ -227,11 +227,21 @@ def _unwrap_subscript_key(node: ast.AST) -> ast.AST:
 class _FieldEvidence:
     """Accumulates position-based evidence for one field name across every
     dict-literal occurrence found - resolved into a FieldKind only after
-    merging across every function a mock block spans (see scan_backend)."""
+    merging across every function a mock block spans (see scan_backend).
+
+    has_dataframe_dict and has_subscript_assign are kept separate (rather
+    than one unified "has_data") because only the latter is subject to the
+    derived-name check: a name built directly into a dataframe-constructor
+    dict is always a real column regardless of naming convention, but a
+    name only ever *assigned* via `X[key] = value` might be a locally
+    computed intermediate (see _resolve_field_kind)."""
     description: str | None
     source_line: int
-    has_data: bool = False
+    has_dataframe_dict: bool = False
+    has_subscript_assign: bool = False
     has_render: bool = False
+    has_config: bool = False
+    has_manual: bool = False
     usage_labels: set = dc_field(default_factory=set)
 
 
@@ -255,6 +265,59 @@ def _resolve_dicts_from_expr(expr: ast.AST | None, appended_lists: dict[str, lis
         if expr.id in simple_assigns:
             return _resolve_dicts_from_expr(simple_assigns[expr.id], appended_lists, simple_assigns, depth + 1)
     return []
+
+
+def _collect_module_level_raw_constants(tree: ast.AST) -> dict[str, ast.AST]:
+    """Every module-level `NAME = <literal>` assignment, keyed to its raw
+    value node (any literal type - number, string, list - not just the
+    string-only resolver in py_const_resolver.py). Used only for the
+    config/manual value-tracing check below, which needs to inspect the
+    constant's own value type and name pattern, not just resolve a string."""
+    constants: dict[str, ast.AST] = {}
+    for node in getattr(tree, "body", []):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            constants[node.targets[0].id] = node.value
+    return constants
+
+
+def _is_number(value_node: ast.AST) -> bool:
+    return isinstance(value_node, ast.Constant) and isinstance(value_node.value, (int, float)) and not isinstance(value_node.value, bool)
+
+
+def _is_string_or_string_list(value_node: ast.AST) -> bool:
+    if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
+        return True
+    if isinstance(value_node, ast.List):
+        return bool(value_node.elts) and all(isinstance(el, ast.Constant) and isinstance(el.value, str) for el in value_node.elts)
+    return False
+
+
+def _classify_value_kind(
+    value_node: ast.AST,
+    module_constants_raw: dict[str, ast.AST],
+    config_patterns: list[re.Pattern],
+    manual_patterns: list[re.Pattern],
+) -> FieldKind | None:
+    """A dict key's own name doesn't tell you whether it's a business
+    parameter or editorial text - its VALUE does. Only a bare Name reference
+    to a module-level constant qualifies (an inline literal has no name to
+    pattern-match, and a computed expression over a constant, e.g.
+    `[WAPE_THRESHOLD] * len(periods)`, is deliberately not traced - staying
+    conservative rather than reaching into expression analysis)."""
+    if not isinstance(value_node, ast.Name):
+        return None
+    const_node = module_constants_raw.get(value_node.id)
+    if const_node is None:
+        return None
+    if any(p.match(value_node.id) for p in config_patterns) and _is_number(const_node):
+        return FieldKind.CONFIG
+    if any(p.match(value_node.id) for p in manual_patterns) and _is_string_or_string_list(const_node):
+        return FieldKind.MANUAL
+    return None
 
 
 def _classify_context_dicts(func_node: ast.FunctionDef | ast.AsyncFunctionDef, markers: dict) -> tuple[set[int], set[int]]:
@@ -314,19 +377,46 @@ def _classify_context_dicts(func_node: ast.FunctionDef | ast.AsyncFunctionDef, m
     return dataframe_ids, response_ids
 
 
-def _resolve_field_kind(name: str, ev: _FieldEvidence) -> DeclaredField:
+def _resolve_field_kind(name: str, ev: _FieldEvidence, derived_name_pattern: re.Pattern) -> DeclaredField:
     """Final kind, resolved only after all of a block's functions' evidence
-    is merged: conflicting signals (both data and render) and no signal at
-    all (neither) are both UNCERTAIN - flagged for human review rather than
-    silently guessed either way."""
-    if ev.has_data and ev.has_render:
+    is merged.
+
+    A name built directly into a dataframe-constructor dict (hard_data) is
+    always a real column - the derived-name check only applies to a name
+    whose *only* positive evidence is a subscript-assign (soft_data): that's
+    either a genuine real column with an unconventional name, or (if it
+    matches the derived-name pattern) a locally-computed intermediate like
+    `work["_year"] = ...`, never something to source from anywhere.
+
+    config/manual are checked before render deliberately: a key can be both
+    inside a jsonify payload AND reference a threshold/placeholder constant
+    at once (the real `rate_warn_threshold` case) - that's not a conflict,
+    config/manual is just a more specific reading of what would otherwise
+    be plain render. A genuine conflict is hard/soft data vs. any display
+    kind, or no signal at all - both resolve to UNCERTAIN, flagged for
+    human review rather than silently guessed either way."""
+    is_derived_name = bool(derived_name_pattern.match(name))
+    hard_data = ev.has_dataframe_dict
+    soft_data = ev.has_subscript_assign and not ev.has_dataframe_dict
+    display = ev.has_render or ev.has_config or ev.has_manual
+
+    if hard_data and display:
         kind = FieldKind.UNCERTAIN
-    elif ev.has_data:
+    elif hard_data:
         kind = FieldKind.DATA
+    elif soft_data and display:
+        kind = FieldKind.UNCERTAIN
+    elif soft_data:
+        kind = FieldKind.DERIVED if is_derived_name else FieldKind.DATA
+    elif ev.has_config:
+        kind = FieldKind.CONFIG
+    elif ev.has_manual:
+        kind = FieldKind.MANUAL
     elif ev.has_render:
         kind = FieldKind.RENDER
     else:
         kind = FieldKind.UNCERTAIN
+
     usage = "; ".join(sorted(ev.usage_labels)) or "unclassified dict literal"
     return DeclaredField(name=name, description=ev.description, source_line=ev.source_line, kind=kind, usage=usage)
 
@@ -336,6 +426,9 @@ def _extract_declared_fields(
     scope_constants: dict[str, tuple[str, int]],
     comments_by_line: dict[int, str],
     markers: dict,
+    module_constants_raw: dict[str, ast.AST],
+    config_patterns: list[re.Pattern],
+    manual_patterns: list[re.Pattern],
     denylist: set[str] = frozenset(),
 ) -> dict[str, _FieldEvidence]:
     """Finds every dict literal's string keys in one function (covers both
@@ -343,11 +436,12 @@ def _extract_declared_fields(
     equally common plain dict-then-jsonify pattern with no DataFrame
     involved - real mock sections in the wild use both), plus
     post-construction `df[COL] = ...` column adds - and records, per field
-    name, whether each occurrence touched a dataframe-constructor dict, a
-    response-wrapper dict, or neither (an unclassified dict literal, e.g. a
-    plain lookup/config table). Kind resolution happens later in
-    scan_backend, after merging evidence across every function a mock block
-    spans - a name's data/render signal isn't final until then.
+    name, which kind(s) of evidence each occurrence carries (dataframe
+    column, subscript-assign, jsonify key, config/manual value reference, or
+    none - an unclassified dict literal, e.g. a plain lookup table). Kind
+    resolution happens later in scan_backend, after merging evidence across
+    every function a mock block spans - a name's signal isn't final until
+    then.
 
     Deliberately scoped to a single function's AST subtree (ast.walk here
     only visits that subtree) rather than a banner block's line range - a
@@ -358,7 +452,7 @@ def _extract_declared_fields(
     dataframe_ids, response_ids = _classify_context_dicts(func_node, markers)
     evidence: dict[str, _FieldEvidence] = {}
 
-    def record(key_node: ast.AST, has_data: bool = False, has_render: bool = False, usage: str = "") -> None:
+    def record(key_node: ast.AST, usage: str = "", **flags: bool) -> None:
         resolved = _resolve_dict_key(key_node, scope_constants)
         if not resolved:
             return
@@ -369,8 +463,9 @@ def _extract_declared_fields(
         if ev is None:
             ev = _FieldEvidence(description=_describe(comments_by_line, desc_line), source_line=key_node.lineno)
             evidence[name] = ev
-        ev.has_data = ev.has_data or has_data
-        ev.has_render = ev.has_render or has_render
+        for flag_name, flag_value in flags.items():
+            if flag_value:
+                setattr(ev, flag_name, True)
         if usage:
             ev.usage_labels.add(usage)
 
@@ -378,19 +473,25 @@ def _extract_declared_fields(
         if isinstance(node, ast.Dict):
             in_dataframe = id(node) in dataframe_ids
             in_response = id(node) in response_ids
-            for k in node.keys:
-                if k is None:
+            for key_node, value_node in zip(node.keys, node.values):
+                if key_node is None:
                     continue
                 if in_dataframe:
-                    record(k, has_data=True, usage="dataframe column")
+                    record(key_node, has_dataframe_dict=True, usage="dataframe column")
                 elif in_response:
-                    record(k, has_render=True, usage="jsonify response key")
+                    record(key_node, has_render=True, usage="jsonify response key")
                 else:
-                    record(k, usage="unclassified dict literal")
+                    record(key_node, usage="unclassified dict literal")
+
+                value_kind = _classify_value_kind(value_node, module_constants_raw, config_patterns, manual_patterns)
+                if value_kind == FieldKind.CONFIG:
+                    record(key_node, has_config=True, usage="config constant reference")
+                elif value_kind == FieldKind.MANUAL:
+                    record(key_node, has_manual=True, usage="manual/placeholder constant reference")
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
-                record(_unwrap_subscript_key(target.slice), has_data=True, usage="post-construction column assignment")
+                record(_unwrap_subscript_key(target.slice), has_subscript_assign=True, usage="post-construction column assignment")
 
     return evidence
 
@@ -420,6 +521,7 @@ def scan_backend(source: str, markers: dict) -> dict:
 
     module_constants_with_lines = resolve_module_string_constants_with_lines(source)
     constants = {name: value for name, (value, _lineno) in module_constants_with_lines.items()}
+    module_constants_raw = _collect_module_level_raw_constants(tree)
 
     # Merge in any function-local string constants (column-name constants
     # sometimes live inside the mock function itself, not at module level).
@@ -434,6 +536,11 @@ def scan_backend(source: str, markers: dict) -> dict:
     keyword_pattern = _compile_keyword_pattern(markers["mock_keywords"])
     mock_fn_patterns = [re.compile(p) for p in markers.get("mock_function_name_patterns", [])]
     migration_patterns = [re.compile(p, re.IGNORECASE) for p in markers.get("migration_hint_patterns", [])]
+    derived_name_pattern = re.compile(
+        "|".join(markers.get("derived_field_name_patterns", ["^_[A-Za-z]"]))
+    )
+    config_patterns = [re.compile(p) for p in markers.get("config_constant_name_patterns", [])]
+    manual_patterns = [re.compile(p) for p in markers.get("manual_constant_name_patterns", [])]
 
     banner_hits = _find_banner_blocks(lines, comments_by_line, markers, keyword_pattern)
     mock_fn_hits = _find_mock_function_defs(tree, mock_fn_patterns)
@@ -507,18 +614,27 @@ def scan_backend(source: str, markers: dict) -> dict:
         # of the same name with different (or conflicting) signals.
         merged_evidence: dict[str, _FieldEvidence] = {}
         for fn_node in target_nodes.values():
-            for name, ev in _extract_declared_fields(fn_node, scope_constants, comments_by_line, markers, denylist).items():
+            fn_evidence = _extract_declared_fields(
+                fn_node, scope_constants, comments_by_line, markers,
+                module_constants_raw, config_patterns, manual_patterns, denylist,
+            )
+            for name, ev in fn_evidence.items():
                 existing = merged_evidence.get(name)
                 if existing is None:
                     merged_evidence[name] = ev
                 else:
-                    existing.has_data = existing.has_data or ev.has_data
+                    existing.has_dataframe_dict = existing.has_dataframe_dict or ev.has_dataframe_dict
+                    existing.has_subscript_assign = existing.has_subscript_assign or ev.has_subscript_assign
                     existing.has_render = existing.has_render or ev.has_render
+                    existing.has_config = existing.has_config or ev.has_config
+                    existing.has_manual = existing.has_manual or ev.has_manual
                     existing.usage_labels |= ev.usage_labels
                     if not existing.description and ev.description:
                         existing.description = ev.description
 
-        block.required_fields = [_resolve_field_kind(name, ev) for name, ev in merged_evidence.items()]
+        block.required_fields = [
+            _resolve_field_kind(name, ev, derived_name_pattern) for name, ev in merged_evidence.items()
+        ]
 
     return {
         "real_reads": real_reads,

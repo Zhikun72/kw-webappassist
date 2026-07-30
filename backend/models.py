@@ -55,19 +55,30 @@ class SectionState(str, Enum):
 class ColumnState(str, Enum):
     SATISFIED = "satisfied"              # present in the dataset this section actually reads
     AVAILABLE_ELSEWHERE = "available_elsewhere"  # not read here, but exists in some real dataset
+    AVAILABLE_AMBIGUOUS = "available_ambiguous"  # name matches too many datasets to trust without an anchor
     DERIVABLE = "derivable"               # Tier 1 missing, but a cached LLM check found it plausible
     MISSING = "missing"                  # not found anywhere by name
 
 
 class FieldKind(str, Enum):
     """Whether a declared field actually touches a dataframe/dataset (DATA -
-    the only kind fill-ability analysis applies to) or only ever sits inside
-    a JSON response payload (RENDER), classified by position in the code,
-    never by name - the same name (`value`, `label`) genuinely plays both
-    roles in different places. UNCERTAIN covers both a conflict (evidence of
-    both) and no signal at all (neither) - flagged rather than guessed."""
+    the only kind fill-ability analysis applies to) or is something else
+    entirely, classified by position in the code, never by name - the same
+    name (`value`, `label`) genuinely plays both roles in different places.
+    - RENDER: only ever sits inside a JSON response payload.
+    - DERIVED: a locally-computed intermediate (`work["_year"] = ...`), not
+      something to source from anywhere.
+    - CONFIG: a business threshold/parameter constant - needs validation,
+      not data acquisition.
+    - MANUAL: free-text/editorial placeholder content - needs authoring,
+      not data acquisition.
+    UNCERTAIN covers both a genuine conflict (evidence of more than one kind)
+    and no signal at all (none) - flagged rather than guessed either way."""
     DATA = "data"
     RENDER = "render"
+    DERIVED = "derived"
+    CONFIG = "config"
+    MANUAL = "manual"
     UNCERTAIN = "uncertain"
 
 
@@ -94,7 +105,8 @@ class NeededColumn:
     description: str | None
     state: ColumnState
     usage: str = ""
-    source_datasets: list[str] = field(default_factory=list)
+    source_datasets: list[str] = field(default_factory=list)  # capped for display
+    candidate_count: int = 0  # true match count, uncapped
     in_intended_source: bool = False
     requested_by: list[str] = field(default_factory=list)  # section ids
 

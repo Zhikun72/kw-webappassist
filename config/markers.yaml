@@ -77,6 +77,48 @@ dataframe_constructor_names:
 response_wrapper_names:
   - "jsonify"
 
+# v3 tightening: three more field kinds carved out of data/render, so
+# "missing" reflects genuine data gaps rather than intermediate variables,
+# business parameters, or editorial placeholder text.
+
+# derived_field_name_patterns: a name matching one of these AND assigned only
+# via `X[key] = value` (never built directly into a dataframe-constructor
+# dict) is a locally-computed intermediate, not a field to source from
+# anywhere (e.g. `work["_year"] = work[DATE_COL].dt.year`). A name built
+# directly into the dataframe-constructor dict always stays `data` regardless
+# of this pattern (the conservative clause - don't downgrade a real column
+# just because of its name).
+derived_field_name_patterns:
+  - '^_[A-Za-z]'
+
+# config_constant_name_patterns: a dict value that's a bare reference to a
+# module-level constant matching one of these, bound to a plain number, is a
+# business threshold/parameter - needs validation, not data acquisition.
+config_constant_name_patterns:
+  - '.*_THRESHOLD$'
+  - '.*_RATE$'
+  - '.*_FALLBACK$'
+  - '.*_CUTOFF$'
+
+# manual_constant_name_patterns: same idea, but for a constant bound to a
+# string or a list of strings - free-text/editorial content that needs
+# authoring, not data acquisition.
+manual_constant_name_patterns:
+  - '^PLACEHOLDER_.*'
+
+# available_elsewhere_ambiguous_threshold: a needed column matching more real
+# datasets than this (by exact/normalized name, with no migration-hint anchor
+# naming one of them) is name-collision noise, not a trustworthy join
+# candidate - downgraded to available_ambiguous rather than presented as a
+# confident match.
+available_elsewhere_ambiguous_threshold: 5
+
+# available_elsewhere_max_sources_shown: cap on how many matching dataset
+# names are carried in a NeededColumn's source_datasets for display: the true
+# count is still recorded separately (candidate_count) so a capped list is
+# never mistaken for the full match count.
+available_elsewhere_max_sources_shown: 5
+
 # How a real dataset read is recognized in code (not comments):
 # `dataiku.Dataset(<arg>)` where <arg> is a quoted literal or a bare name
 # that resolves to a module-level string constant (see py_const_resolver.py).
