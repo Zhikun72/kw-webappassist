@@ -1,6 +1,6 @@
 from backend.column_matching import build_column_index
 from backend.inventory import build_sections_for_webapp, classify_needed_columns_for_webapp
-from backend.models import Column, ColumnState, Dataset, MockBlock, RealRead, RequiredColsCheck, SectionState, DeclaredField
+from backend.models import Column, ColumnState, Dataset, FieldKind, MockBlock, RealRead, RequiredColsCheck, SectionState, DeclaredField
 from backend.mock_detector import scan_backend
 from backend.config import load_markers
 
@@ -154,3 +154,32 @@ def test_classify_needed_columns_for_webapp_dedupes_and_tracks_requesters():
     region_cols = [c for c in needed if c.name == "region"]
     assert len(region_cols) == 1
     assert len(region_cols[0].requested_by) == 2
+
+
+def test_render_and_uncertain_fields_excluded_from_fill_ability_analysis():
+    """A mock block's render/uncertain fields (Part 5's classification gate)
+    must never inflate the column-state counts - only DATA fields get a
+    fill-ability state."""
+    column_index = build_column_index(DATASETS)
+    mock_block = MockBlock(
+        id="mock-3",
+        title="Mixed kinds",
+        start_line=1,
+        end_line=5,
+        required_fields=[
+            DeclaredField(name="region", description=None, source_line=2, kind=FieldKind.DATA),
+            DeclaredField(name="chart_label", description=None, source_line=3, kind=FieldKind.RENDER),
+            DeclaredField(name="ambiguous_key", description=None, source_line=4, kind=FieldKind.UNCERTAIN),
+        ],
+    )
+    scan_result = _scan_result_for(mock_blocks=[mock_block])
+
+    class FakeWebapp:
+        id = "w1"
+
+    sections = build_sections_for_webapp(FakeWebapp(), scan_result, DATASETS, column_index)
+    section = sections[0]
+
+    assert section.total_count == 1
+    assert [c.name for c in section.column_states] == ["region"]
+    assert {f.name for f in section.non_data_fields} == {"chart_label", "ambiguous_key"}

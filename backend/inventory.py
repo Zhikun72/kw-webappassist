@@ -19,11 +19,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from backend.column_matching import normalize_column_name
-from backend.models import ColumnState, Dataset, DeclaredField, NeededColumn, SectionState, Webapp, WebappSection
+from backend.models import ColumnState, Dataset, DeclaredField, FieldKind, NeededColumn, SectionState, Webapp, WebappSection
 
 REQUIRED_COLS_PAIRING_WINDOW = 100  # lines a required_cols check may trail its real_read
 
-_STATE_RANK = {ColumnState.MISSING: 0, ColumnState.AVAILABLE_ELSEWHERE: 1, ColumnState.SATISFIED: 2}
+_STATE_RANK = {
+    ColumnState.MISSING: 0,
+    ColumnState.AVAILABLE_ELSEWHERE: 1,
+    ColumnState.DERIVABLE: 2,
+    ColumnState.SATISFIED: 3,
+}
 
 
 @dataclass
@@ -70,6 +75,7 @@ def classify_column(
             name=field.name,
             description=field.description,
             state=ColumnState.SATISFIED,
+            usage=field.usage,
             source_datasets=[matched_dataset.name],
             in_intended_source=False,
             requested_by=[section_id],
@@ -79,6 +85,7 @@ def classify_column(
             name=field.name,
             description=field.description,
             state=ColumnState.AVAILABLE_ELSEWHERE,
+            usage=field.usage,
             source_datasets=sources,
             in_intended_source=bool(migration_hint_dataset) and migration_hint_dataset in sources,
             requested_by=[section_id],
@@ -87,6 +94,7 @@ def classify_column(
         name=field.name,
         description=field.description,
         state=ColumnState.MISSING,
+        usage=field.usage,
         source_datasets=[],
         in_intended_source=False,
         requested_by=[section_id],
@@ -136,8 +144,15 @@ def build_sections_for_webapp(
 
     for block in scan_result["mock_blocks"]:
         section_id = block.id
+        # Only DATA fields go through fill-ability classification - a
+        # render field (a jsonify response key that never touches a
+        # dataframe) always comes back Missing against real schemas, which
+        # would inflate the gap count against the wrong denominator. RENDER/
+        # UNCERTAIN fields are tracked separately, untouched, for review.
+        data_fields = [f for f in block.required_fields if f.kind == FieldKind.DATA]
+        non_data_fields = [f for f in block.required_fields if f.kind != FieldKind.DATA]
         column_states = [
-            classify_column(f, None, column_index, block.migration_hint_dataset, section_id) for f in block.required_fields
+            classify_column(f, None, column_index, block.migration_hint_dataset, section_id) for f in data_fields
         ]
         sections.append(
             WebappSection(
@@ -145,11 +160,12 @@ def build_sections_for_webapp(
                 label=block.title or block.id,
                 state=SectionState.MOCK,
                 mock_block=block,
-                required_columns=[f.name for f in block.required_fields],
+                required_columns=[f.name for f in data_fields],
                 missing_columns=[c.name for c in column_states if c.state == ColumnState.MISSING],
                 column_states=column_states,
                 satisfied_count=sum(1 for c in column_states if c.state == ColumnState.SATISFIED),
                 total_count=len(column_states),
+                non_data_fields=non_data_fields,
             )
         )
 
@@ -173,6 +189,7 @@ def classify_needed_columns_for_webapp(webapp: Webapp) -> list[NeededColumn]:
                     name=col.name,
                     description=col.description,
                     state=col.state,
+                    usage=col.usage,
                     source_datasets=list(col.source_datasets),
                     in_intended_source=col.in_intended_source,
                     requested_by=list(col.requested_by),

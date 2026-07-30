@@ -24,7 +24,41 @@
     appBody: document.getElementById("app-body"),
     themeBtn: document.getElementById("btn-theme"),
     newUploadBtn: document.getElementById("btn-new-upload"),
+    exportBtn: document.getElementById("btn-export"),
   };
+
+  function downloadFile(filename, content, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  el.exportBtn.addEventListener("click", async () => {
+    if (!state.analysisId) return;
+    el.exportBtn.disabled = true;
+    el.exportBtn.textContent = "Exporting…";
+    try {
+      const [jsonResp, mdResp] = await Promise.all([
+        fetch(`/api/analyses/${state.analysisId}/export`),
+        fetch(`/api/analyses/${state.analysisId}/export?format=markdown`),
+      ]);
+      const json = await jsonResp.json();
+      const markdown = await mdResp.text();
+      downloadFile(`${state.analysisId}-triage.json`, JSON.stringify(json, null, 2), "application/json");
+      downloadFile(`${state.analysisId}-triage.md`, markdown, "text/markdown");
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+    } finally {
+      el.exportBtn.disabled = false;
+      el.exportBtn.textContent = "Export";
+    }
+  });
 
   // ---- Theme ----
   function applyStoredTheme() {

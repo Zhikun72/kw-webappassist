@@ -58,6 +58,25 @@ migration_hint_patterns:
 declared_field_denylist:
   - "error"
 
+# Data-vs-render field classification (Part 5): a mock block's declared
+# fields are only "fillable from data" if they actually touch a
+# dataframe/dataset somewhere - a dict key that only ever sits inside a
+# JSON response payload is a render field, not a data gap. Classified by
+# POSITION (which call a dict literal is passed to), never by field name -
+# the same name plays both roles in different places in real code.
+#
+# dataframe_constructor_names: call names whose dict-literal argument's keys
+# become dataframe columns (a "data" signal).
+dataframe_constructor_names:
+  - "DataFrame"
+
+# response_wrapper_names: call names whose dict-literal argument's keys are
+# JSON response fields, not data (a "render" signal) - unless that same key
+# also shows up in a dataframe-constructor context elsewhere, which is a
+# genuine conflict (flagged uncertain, never silently resolved either way).
+response_wrapper_names:
+  - "jsonify"
+
 # How a real dataset read is recognized in code (not comments):
 # `dataiku.Dataset(<arg>)` where <arg> is a quoted literal or a bare name
 # that resolves to a module-level string constant (see py_const_resolver.py).

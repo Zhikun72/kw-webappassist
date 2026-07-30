@@ -11,11 +11,12 @@ import zipfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 load_dotenv()
 
 from backend.config import load_markers, upload_dir  # noqa: E402
+from backend.export import build_export  # noqa: E402
 from backend.flow_graph import zone_for_dataset  # noqa: E402
 from backend.inventory import classify_needed_columns_for_webapp  # noqa: E402
 from backend.llm_gap_analysis import get_gap_analyzer  # noqa: E402
@@ -83,6 +84,10 @@ def upload():
         "graph": graph,
         "inventory": inventory,
         "layout": layout,
+        # Populated by the /derivability route as the LLM step gets used;
+        # the /export route only ever reads from this cache, never triggers
+        # a new LLM call itself. Keyed by (webapp_id, section_id).
+        "derivability_cache": {},
     }
 
     return jsonify({"analysis_id": analysis_id, **_discovery_payload(analysis_id)})
@@ -296,7 +301,26 @@ def derivability(analysis_id, webapp_id, section_id):
             }
         )
 
+    # Cache so /export can surface a "derivable" state without ever
+    # triggering a new LLM call itself - export only reads what a human
+    # already checked here.
+    bundle["derivability_cache"][(webapp_id, section_id)] = result
+
     return jsonify(to_dict(result))
+
+
+@app.route("/api/analyses/<analysis_id>/export")
+def export_view(analysis_id):
+    bundle = _get_analysis(analysis_id)
+    if not bundle:
+        return jsonify({"error": "Unknown analysis_id"}), 404
+
+    export = build_export(bundle["project"], bundle["derivability_cache"])
+
+    if request.args.get("format") == "markdown":
+        return Response(export["markdown_summary"], mimetype="text/markdown")
+
+    return jsonify(export)
 
 
 if __name__ == "__main__":

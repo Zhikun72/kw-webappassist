@@ -1,7 +1,33 @@
 from backend.config import load_markers
 from backend.mock_detector import scan_backend
+from backend.models import FieldKind
 
 MARKERS = load_markers()
+
+# Reproduces the real project's own ambiguity: the same field name
+# ("conflict_field") shows up as a dataframe column in one function and as
+# a jsonify response key in a sibling function within the same block -
+# classification is by position (which dict a key's occurrences actually
+# touch), never by name.
+FIELD_KIND_SOURCE = '''
+import pandas as pd
+from flask import jsonify
+
+# ============================================================
+# Kind Classification - MOCK DATA
+# ============================================================
+def kind_view():
+    lookup_table = {"east": 1, "west": 2}
+    payload = {"conflict_field": "seen in jsonify here", "render_only": "just for display"}
+    return jsonify(payload)
+
+
+def _mock_kind_data():
+    rows = []
+    for i in range(2):
+        rows.append({"amount": i * 2, "conflict_field": i})
+    return pd.DataFrame(rows)
+'''
 
 BACKEND_SOURCE = '''
 import dataiku
@@ -109,3 +135,44 @@ def test_declared_field_denylist_filters_boilerplate_keys():
     names = {f.name for f in migration_block.required_fields}
     assert "error" not in names
     assert "y" in names
+
+
+def _kind_fields():
+    result = scan_backend(FIELD_KIND_SOURCE, MARKERS)
+    block = next(b for b in result["mock_blocks"] if "_mock_kind_data" in b.mock_functions)
+    return {f.name: f for f in block.required_fields}
+
+
+def test_field_used_only_as_dataframe_column_is_data():
+    fields = _kind_fields()
+    assert fields["amount"].kind == FieldKind.DATA
+    assert fields["amount"].usage == "dataframe column"
+
+
+def test_field_used_only_as_jsonify_key_is_render():
+    fields = _kind_fields()
+    assert fields["render_only"].kind == FieldKind.RENDER
+    assert fields["render_only"].usage == "jsonify response key"
+
+
+def test_field_used_as_both_dataframe_and_jsonify_key_is_uncertain_conflict():
+    """The user's own real-world example: the same name plays both roles in
+    different places - must be flagged, not silently resolved either way."""
+    fields = _kind_fields()
+    assert fields["conflict_field"].kind == FieldKind.UNCERTAIN
+
+
+def test_field_with_no_data_or_render_signal_is_uncertain():
+    """A key inside an unrelated lookup dict (never passed to DataFrame or
+    jsonify) has no signal at all - also uncertain, not guessed."""
+    fields = _kind_fields()
+    assert fields["east"].kind == FieldKind.UNCERTAIN
+    assert fields["east"].usage == "unclassified dict literal"
+
+
+def test_required_cols_fields_are_always_data_kind():
+    """required_cols-derived fields are data by construction - no
+    classification ambiguity, unlike mock-block fields."""
+    result = scan_backend(BACKEND_SOURCE, MARKERS)
+    checks = result["required_cols_checks"]
+    assert all(f.kind == FieldKind.DATA for f in checks[0].fields)

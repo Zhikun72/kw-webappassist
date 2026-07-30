@@ -55,18 +55,35 @@ class SectionState(str, Enum):
 class ColumnState(str, Enum):
     SATISFIED = "satisfied"              # present in the dataset this section actually reads
     AVAILABLE_ELSEWHERE = "available_elsewhere"  # not read here, but exists in some real dataset
+    DERIVABLE = "derivable"               # Tier 1 missing, but a cached LLM check found it plausible
     MISSING = "missing"                  # not found anywhere by name
+
+
+class FieldKind(str, Enum):
+    """Whether a declared field actually touches a dataframe/dataset (DATA -
+    the only kind fill-ability analysis applies to) or only ever sits inside
+    a JSON response payload (RENDER), classified by position in the code,
+    never by name - the same name (`value`, `label`) genuinely plays both
+    roles in different places. UNCERTAIN covers both a conflict (evidence of
+    both) and no signal at all (neither) - flagged rather than guessed."""
+    DATA = "data"
+    RENDER = "render"
+    UNCERTAIN = "uncertain"
 
 
 @dataclass
 class DeclaredField:
     """A column name a webapp declares it needs or produces - either from a
     `required_cols`-style check (real read) or from a mock block's own
-    DataFrame construction. Shared shape so both flow through the same
-    column-matching logic."""
+    field construction. Shared shape so both flow through the same
+    column-matching logic. `required_cols`-derived fields are DATA by
+    construction (default) - classification only runs for mock-block fields,
+    which mix real columns with pure render keys."""
     name: str
     description: str | None
     source_line: int
+    kind: FieldKind = FieldKind.DATA
+    usage: str = "required_cols check"
 
 
 @dataclass
@@ -76,6 +93,7 @@ class NeededColumn:
     name: str
     description: str | None
     state: ColumnState
+    usage: str = ""
     source_datasets: list[str] = field(default_factory=list)
     in_intended_source: bool = False
     requested_by: list[str] = field(default_factory=list)  # section ids
@@ -125,6 +143,7 @@ class WebappSection:
     column_states: list[NeededColumn] = field(default_factory=list)
     satisfied_count: int = 0
     total_count: int = 0
+    non_data_fields: list[DeclaredField] = field(default_factory=list)  # render/uncertain - excluded from fill-ability
 
 
 @dataclass

@@ -24,8 +24,9 @@ import ast
 import io
 import re
 import tokenize
+from dataclasses import dataclass, field as dc_field
 
-from backend.models import DeclaredField, MockBlock, RealRead, RequiredColsCheck
+from backend.models import DeclaredField, FieldKind, MockBlock, RealRead, RequiredColsCheck
 from backend.py_const_resolver import (
     resolve_local_string_constants,
     resolve_module_string_constants_with_lines,
@@ -222,23 +223,131 @@ def _unwrap_subscript_key(node: ast.AST) -> ast.AST:
     return node.value if isinstance(node, getattr(ast, "Index", ())) else node
 
 
+@dataclass
+class _FieldEvidence:
+    """Accumulates position-based evidence for one field name across every
+    dict-literal occurrence found - resolved into a FieldKind only after
+    merging across every function a mock block spans (see scan_backend)."""
+    description: str | None
+    source_line: int
+    has_data: bool = False
+    has_render: bool = False
+    usage_labels: set = dc_field(default_factory=set)
+
+
+def _resolve_dicts_from_expr(expr: ast.AST | None, appended_lists: dict[str, list], simple_assigns: dict[str, ast.expr], depth: int = 0) -> list:
+    """Best-effort trace from an expression back to the ast.Dict literal(s)
+    it concretely refers to: a direct dict, a list of dicts, a variable built
+    via `var.append({...})`, or a simple `X = <expr>` alias. Bounded
+    recursion guards against self-referential assigns."""
+    if depth > 4 or expr is None:
+        return []
+    if isinstance(expr, ast.Dict):
+        return [expr]
+    if isinstance(expr, ast.List):
+        found = []
+        for el in expr.elts:
+            found.extend(_resolve_dicts_from_expr(el, appended_lists, simple_assigns, depth + 1))
+        return found
+    if isinstance(expr, ast.Name):
+        if expr.id in appended_lists:
+            return list(appended_lists[expr.id])
+        if expr.id in simple_assigns:
+            return _resolve_dicts_from_expr(simple_assigns[expr.id], appended_lists, simple_assigns, depth + 1)
+    return []
+
+
+def _classify_context_dicts(func_node: ast.FunctionDef | ast.AsyncFunctionDef, markers: dict) -> tuple[set[int], set[int]]:
+    """Returns (dataframe_context_ids, response_context_ids): id()s of
+    ast.Dict nodes whose keys are dataframe columns vs JSON response fields,
+    determined by which call (config-driven name list) the dict is passed
+    to - directly, via a `var.append({...})` list, or via a simple `X =
+    <expr>` alias. Marking recurses into nested dict values, so a dict
+    nested inside a response payload inherits response-context for its own
+    keys too (and likewise for a dataframe-context dict, symmetrically)."""
+    dataframe_names = set(markers.get("dataframe_constructor_names", ["DataFrame"]))
+    response_names = set(markers.get("response_wrapper_names", ["jsonify"]))
+
+    appended_lists: dict[str, list[ast.Dict]] = {}
+    simple_assigns: dict[str, ast.expr] = {}
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            simple_assigns[node.targets[0].id] = node.value
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Name)
+            and node.args
+            and isinstance(node.args[0], ast.Dict)
+        ):
+            appended_lists.setdefault(node.func.value.id, []).append(node.args[0])
+
+    dataframe_ids: set[int] = set()
+    response_ids: set[int] = set()
+
+    def mark_recursive(dicts: list[ast.Dict], target_set: set[int]) -> None:
+        for d in dicts:
+            if id(d) in target_set:
+                continue
+            target_set.add(id(d))
+            for v in d.values:
+                # A value that's itself a literal dict/list is walked
+                # directly; a value that's a bare Name (e.g. `"cy26": cy26`
+                # referencing an earlier `cy26 = {...}`) needs the same
+                # alias resolution used for the top-level call argument -
+                # otherwise everything nested behind one variable
+                # indirection silently loses its context.
+                mark_recursive(_resolve_dicts_from_expr(v, appended_lists, simple_assigns), target_set)
+
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        call_name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
+        if call_name in dataframe_names:
+            mark_recursive(_resolve_dicts_from_expr(node.args[0], appended_lists, simple_assigns), dataframe_ids)
+        elif call_name in response_names:
+            for arg in node.args:
+                mark_recursive(_resolve_dicts_from_expr(arg, appended_lists, simple_assigns), response_ids)
+
+    return dataframe_ids, response_ids
+
+
+def _resolve_field_kind(name: str, ev: _FieldEvidence) -> DeclaredField:
+    """Final kind, resolved only after all of a block's functions' evidence
+    is merged: conflicting signals (both data and render) and no signal at
+    all (neither) are both UNCERTAIN - flagged for human review rather than
+    silently guessed either way."""
+    if ev.has_data and ev.has_render:
+        kind = FieldKind.UNCERTAIN
+    elif ev.has_data:
+        kind = FieldKind.DATA
+    elif ev.has_render:
+        kind = FieldKind.RENDER
+    else:
+        kind = FieldKind.UNCERTAIN
+    usage = "; ".join(sorted(ev.usage_labels)) or "unclassified dict literal"
+    return DeclaredField(name=name, description=ev.description, source_line=ev.source_line, kind=kind, usage=usage)
+
+
 def _extract_declared_fields(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     scope_constants: dict[str, tuple[str, int]],
     comments_by_line: dict[int, str],
+    markers: dict,
     denylist: set[str] = frozenset(),
-) -> list[DeclaredField]:
-    """Finds the fields one function's own code produces: every dict
-    literal's string keys (covers both the `pd.DataFrame([{...}, ...])` /
-    `rows.append({...})` pattern and the equally common plain
-    dict-then-jsonify pattern with no DataFrame involved at all - real mock
-    sections in the wild use both), plus post-construction `df[COL] = ...`
-    column adds. Nested dicts are walked too (a dict value that is itself a
-    dict contributes its own keys), which is deliberately permissive: a few
-    structural wrapper keys ("trend", "rows") mixed in with real data field
-    names ("base", "category") is an acceptable tradeoff for a best-effort
-    discovery tool - column-matching downstream still classifies each by
-    whether it exists anywhere in the project's real schemas.
+) -> dict[str, _FieldEvidence]:
+    """Finds every dict literal's string keys in one function (covers both
+    the `pd.DataFrame([{...}, ...])` / `rows.append({...})` pattern and the
+    equally common plain dict-then-jsonify pattern with no DataFrame
+    involved - real mock sections in the wild use both), plus
+    post-construction `df[COL] = ...` column adds - and records, per field
+    name, whether each occurrence touched a dataframe-constructor dict, a
+    response-wrapper dict, or neither (an unclassified dict literal, e.g. a
+    plain lookup/config table). Kind resolution happens later in
+    scan_backend, after merging evidence across every function a mock block
+    spans - a name's data/render signal isn't final until then.
 
     Deliberately scoped to a single function's AST subtree (ast.walk here
     only visits that subtree) rather than a banner block's line range - a
@@ -246,28 +355,44 @@ def _extract_declared_fields(
     generic variable names like `rows`/`children` for unrelated JSON-response
     construction, and a range-based scan cross-contaminates those with the
     mock's actual fields."""
-    fields: dict[str, DeclaredField] = {}
+    dataframe_ids, response_ids = _classify_context_dicts(func_node, markers)
+    evidence: dict[str, _FieldEvidence] = {}
 
-    def add_field(key_node: ast.AST) -> None:
+    def record(key_node: ast.AST, has_data: bool = False, has_render: bool = False, usage: str = "") -> None:
         resolved = _resolve_dict_key(key_node, scope_constants)
         if not resolved:
             return
         name, desc_line = resolved
-        if name in fields or name in denylist:
+        if name in denylist:
             return
-        fields[name] = DeclaredField(name=name, description=_describe(comments_by_line, desc_line), source_line=key_node.lineno)
+        ev = evidence.get(name)
+        if ev is None:
+            ev = _FieldEvidence(description=_describe(comments_by_line, desc_line), source_line=key_node.lineno)
+            evidence[name] = ev
+        ev.has_data = ev.has_data or has_data
+        ev.has_render = ev.has_render or has_render
+        if usage:
+            ev.usage_labels.add(usage)
 
     for node in ast.walk(func_node):
         if isinstance(node, ast.Dict):
+            in_dataframe = id(node) in dataframe_ids
+            in_response = id(node) in response_ids
             for k in node.keys:
-                if k is not None:
-                    add_field(k)
+                if k is None:
+                    continue
+                if in_dataframe:
+                    record(k, has_data=True, usage="dataframe column")
+                elif in_response:
+                    record(k, has_render=True, usage="jsonify response key")
+                else:
+                    record(k, usage="unclassified dict literal")
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
-                add_field(_unwrap_subscript_key(target.slice))
+                record(_unwrap_subscript_key(target.slice), has_data=True, usage="post-construction column assignment")
 
-    return list(fields.values())
+    return evidence
 
 
 def _find_functions_in_range(tree: ast.Module, start_line: int, end_line: int) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -376,11 +501,24 @@ def scan_backend(source: str, markers: dict) -> dict:
         for fn_node in _find_functions_in_range(tree, block.start_line, block.end_line):
             target_nodes[id(fn_node)] = fn_node
 
-        merged: dict[str, DeclaredField] = {}
+        # A field's kind can only be resolved after merging evidence across
+        # every function this block spans - e.g. a builder function and a
+        # separate route-handler function can each contribute occurrences
+        # of the same name with different (or conflicting) signals.
+        merged_evidence: dict[str, _FieldEvidence] = {}
         for fn_node in target_nodes.values():
-            for f in _extract_declared_fields(fn_node, scope_constants, comments_by_line, denylist):
-                merged.setdefault(f.name, f)
-        block.required_fields = list(merged.values())
+            for name, ev in _extract_declared_fields(fn_node, scope_constants, comments_by_line, markers, denylist).items():
+                existing = merged_evidence.get(name)
+                if existing is None:
+                    merged_evidence[name] = ev
+                else:
+                    existing.has_data = existing.has_data or ev.has_data
+                    existing.has_render = existing.has_render or ev.has_render
+                    existing.usage_labels |= ev.usage_labels
+                    if not existing.description and ev.description:
+                        existing.description = ev.description
+
+        block.required_fields = [_resolve_field_kind(name, ev) for name, ev in merged_evidence.items()]
 
     return {
         "real_reads": real_reads,
