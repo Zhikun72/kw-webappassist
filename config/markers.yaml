@@ -1,0 +1,70 @@
+# Mock-detection configuration for the Dataiku Webapp Data Inspector.
+#
+# Nothing in backend/mock_detector.py should hardcode project-specific
+# strings - every marker, banner shape, and naming pattern a developer might
+# use to flag mock data lives here instead. Add/remove entries per project;
+# the detector logic itself never changes.
+#
+# All regexes are Python `re` syntax and matched with re.IGNORECASE unless
+# noted. `{keywords}` group is built from mock_keywords at load time.
+
+# A "banner" is a full-width comment divider (e.g. "# === ... ===") that
+# precedes a section. banner_line_pattern matches the divider line itself;
+# a banner "hit" requires a mock_keyword to appear on the divider line or in
+# the 1-2 comment lines immediately following it (see mock_detector.py
+# BANNER_LOOKAHEAD_LINES below).
+banner_line_pattern: '^\s*#\s*=\s*=+\s*$|^\s*#\s*=+.*=+\s*$'
+banner_lookahead_lines: 2
+
+# Keywords that mark a block/line as mock data. Matching is case-insensitive
+# and scoped to comment text only (the part of a line at/after a `#`, or an
+# entire line that is a comment) - never plain string literals in code, so
+# UI strings like placeholder="..." never false-positive.
+mock_keywords:
+  - "MOCK DATA"
+  - "ALL MOCK DATA"
+  - "mock"
+  - "dummy"
+  - "placeholder"
+  - "ダミー"
+  - "暫定"
+  - "仮データ"
+  - "仮実装"
+
+# Function/variable name patterns that indicate a mock data generator.
+# Matched against `def <name>(` and top-level `<name> = ` assignments.
+mock_function_name_patterns:
+  - '^_mock_.*'
+  - '^load_.*mock.*'
+  - '.*_mock_data$'
+  - '.*_dummy_.*'
+
+# Migration-hint patterns: comments stating an intended real source for a
+# mock block. Captures the referenced dataset name (if quoted) so it can be
+# checked against the project's real datasets, even when no exact match
+# exists (see backend/inventory.py referenced-missing handling).
+migration_hint_patterns:
+  - '実データ移行時'
+  - '実データ.*移行'
+  - 'when moving to real data'
+  - 'migrate.*real data'
+  - 'TODO.*real dataset'
+
+# How a real dataset read is recognized in code (not comments):
+# `dataiku.Dataset(<arg>)` where <arg> is a quoted literal or a bare name
+# that resolves to a module-level string constant (see py_const_resolver.py).
+real_read_pattern: 'dataiku\.Dataset\(\s*([A-Za-z_][A-Za-z0-9_]*|"[^"]*"|''[^'']*'')\s*\)'
+get_dataframe_pattern: '\.get_dataframe\('
+
+# Variable-name patterns treated as a "required columns" declaration - a
+# field-gap check the webapp itself performs. Its declared columns are
+# high-value signal for the LLM derivability step.
+required_cols_var_patterns:
+  - '^required_cols$'
+  - '^required_columns$'
+  - '^REQUIRED_COLS$'
+
+# File extensions scanned per webapp backend. STANDARD webapps may also ship
+# app.js/body.html/style.css; those are inventoried as present/absent but not
+# pattern-scanned for mock markers (mock lives in the Python backend).
+backend_filename: "backend.py"

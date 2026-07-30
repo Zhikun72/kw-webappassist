@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dataiku Webapp Data Inspector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/layout.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/components.css') }}">
+</head>
+<body>
+  <div id="app" class="app-shell" hidden>
+    <!-- Toolbar -->
+    <header class="toolbar">
+      <div class="toolbar__brand"><span class="dot"></span> Data Inspector</div>
+      <div class="toolbar__meta" id="toolbar-meta"></div>
+      <div class="toolbar__spacer"></div>
+      <button class="btn" id="btn-theme" title="Toggle theme">Theme</button>
+      <button class="btn" id="btn-new-upload">New analysis</button>
+    </header>
+
+    <!-- Body: data pane / canvas / drawer -->
+    <div class="app-body" id="app-body">
+      <aside class="data-pane" id="data-pane"></aside>
+
+      <main class="canvas-wrap" id="canvas-wrap">
+        <div class="canvas-toolbar">
+          <button class="btn btn--icon" id="btn-zoom-in" title="Zoom in">+</button>
+          <button class="btn btn--icon" id="btn-zoom-out" title="Zoom out">&minus;</button>
+          <button class="btn btn--icon" id="btn-zoom-reset" title="Reset view">&#8634;</button>
+        </div>
+        <div class="canvas-hint">Scroll to zoom &middot; drag to pan &middot; click a node for detail</div>
+        <svg id="graph-svg"></svg>
+        <div class="card canvas-legend" id="canvas-legend"></div>
+      </main>
+
+      <aside class="drawer" id="drawer">
+        <div class="drawer__empty">Select a webapp section or a flow node to see detail here.</div>
+      </aside>
+    </div>
+
+    <!-- Worksheet tabs (webapp switcher) -->
+    <nav class="worksheet-tabs" id="worksheet-tabs"></nav>
+  </div>
+
+  <div class="viz-tooltip" id="tooltip"></div>
+
+  <div class="upload-overlay" id="upload-overlay">
+    <div class="dropzone" id="dropzone">
+      <h1>Dataiku Webapp Data Inspector</h1>
+      <p>Drop a project export .zip here, or choose a file. Nothing is hardcoded to one project &mdash; drop any Dataiku export.</p>
+      <input type="file" id="file-input" accept=".zip" hidden>
+      <button class="btn btn--primary" id="btn-choose-file">Choose export .zip</button>
+      <div class="dropzone__progress" id="upload-progress" hidden>Analyzing export&hellip;</div>
+      <div class="dropzone__error" id="upload-error" hidden></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script src="{{ url_for('static', filename='js/api.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/graph.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/panels.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
