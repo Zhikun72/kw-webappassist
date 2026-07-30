@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.column_matching import build_column_index
 from backend.flow_graph import FlowGraph, build_flow_graph
 from backend.inventory import InventoryResult, build_sections_for_webapp, compute_inventory
 from backend.ingest import extract_zip, parse_manifest
@@ -35,11 +36,12 @@ def analyze_zip(zip_path: Path, work_dir: Path, markers: dict) -> tuple[Project,
         project.zones = parse_zones(layout.zones_dir)
 
     graph = build_flow_graph(project.recipes)
+    column_index = build_column_index(project.datasets)
 
     if layout.web_apps_dir:
         webapps, scan_results = parse_webapps(layout.web_apps_dir, markers)
         for webapp in webapps:
-            webapp.sections = build_sections_for_webapp(webapp, scan_results[webapp.id], project.datasets)
+            webapp.sections = build_sections_for_webapp(webapp, scan_results[webapp.id], project.datasets, column_index)
         project.webapps = webapps
     else:
         project.discovery_warnings.append("No web_apps/ directory found - nothing to inventory.")

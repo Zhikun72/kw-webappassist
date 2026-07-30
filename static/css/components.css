@@ -50,6 +50,18 @@
 .badge--referenced_missing .dot { background: var(--status-critical); }
 .badge--unused { color: var(--text-muted); background: color-mix(in srgb, var(--status-neutral) 16%, transparent); }
 .badge--unused .dot { background: var(--status-neutral); }
+.badge--partial { color: var(--status-serious); background: color-mix(in srgb, var(--status-serious) 16%, transparent); }
+.badge--partial .dot { background: var(--status-serious); }
+
+/* --- Column-state badges (per-field, inside a gap card / column list) --- */
+.badge--col-satisfied { color: var(--status-good); background: color-mix(in srgb, var(--status-good) 14%, transparent); }
+.badge--col-satisfied .dot { background: var(--status-good); }
+.badge--col-available_elsewhere { color: var(--status-serious); background: color-mix(in srgb, var(--status-serious) 16%, transparent); }
+.badge--col-available_elsewhere .dot { background: var(--status-serious); }
+.badge--col-missing { color: var(--status-critical); background: color-mix(in srgb, var(--status-critical) 14%, transparent); }
+.badge--col-missing .dot { background: var(--status-critical); }
+
+.tree-row__ratio { font-size: 10.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
 /* --- Data-pane tree --- */
 .tree-group { margin-bottom: 4px; }

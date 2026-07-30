@@ -17,8 +17,9 @@ load_dotenv()
 
 from backend.config import load_markers, upload_dir  # noqa: E402
 from backend.flow_graph import zone_for_dataset  # noqa: E402
+from backend.inventory import classify_needed_columns_for_webapp  # noqa: E402
 from backend.llm_gap_analysis import get_gap_analyzer  # noqa: E402
-from backend.models import SectionState, to_dict  # noqa: E402
+from backend.models import ColumnState, SectionState, to_dict  # noqa: E402
 from backend.project_analysis import analyze_zip, candidate_datasets_for_mock  # noqa: E402
 
 app = Flask(__name__)
@@ -31,7 +32,7 @@ ANALYSES: dict[str, dict] = {}
 
 
 def _section_counts(webapp):
-    counts = {"ready": 0, "mock": 0, "referenced_missing": 0}
+    counts = {"ready": 0, "partial": 0, "mock": 0, "referenced_missing": 0}
     for section in webapp.sections:
         counts[section.state.value] += 1
     return counts
@@ -201,6 +202,25 @@ def webapp_detail(analysis_id, webapp_id):
     )
 
 
+@app.route("/api/analyses/<analysis_id>/webapps/<webapp_id>/columns")
+def webapp_columns(analysis_id, webapp_id):
+    bundle = _get_analysis(analysis_id)
+    if not bundle:
+        return jsonify({"error": "Unknown analysis_id"}), 404
+
+    project = bundle["project"]
+    webapp = next((w for w in project.webapps if w.id == webapp_id), None)
+    if not webapp:
+        return jsonify({"error": "Unknown webapp_id"}), 404
+
+    needed = classify_needed_columns_for_webapp(webapp)
+    summary = {"needed": len(needed), "satisfied": 0, "available_elsewhere": 0, "missing": 0}
+    for col in needed:
+        summary[col.state.value] += 1
+
+    return jsonify({"summary": summary, "columns": [to_dict(c) for c in needed]})
+
+
 @app.route("/api/analyses/<analysis_id>/datasets/<dataset_name>")
 def dataset_detail(analysis_id, dataset_name):
     bundle = _get_analysis(analysis_id)
@@ -247,10 +267,25 @@ def derivability(analysis_id, webapp_id, section_id):
     if not section or section.state != SectionState.MOCK or not section.mock_block:
         return jsonify({"error": "Section is not a mock block."}), 400
 
+    # Tier 1 (exact/normalized column matching) already resolved Satisfied /
+    # Available-elsewhere deterministically - the LLM only earns its keep on
+    # the fuzzy residue: fields with no exact match anywhere in the project.
+    missing_names = {c.name for c in section.column_states if c.state == ColumnState.MISSING}
+    needed_fields = [f for f in section.mock_block.required_fields if f.name in missing_names]
+    if not needed_fields:
+        return jsonify(
+            {
+                "mock_block_id": section.mock_block.id,
+                "fields": [],
+                "overall_note": "Every declared field already resolved by exact column matching - no LLM call needed.",
+                "engine": "none",
+            }
+        )
+
     candidates = candidate_datasets_for_mock(section.mock_block, project, graph)
     analyzer = get_gap_analyzer()
     try:
-        result = analyzer.analyze(section.mock_block, candidates)
+        result = analyzer.analyze(section.mock_block, candidates, needed_fields)
     except Exception as exc:  # noqa: BLE001 - never let an LLM outage break the page
         return jsonify(
             {

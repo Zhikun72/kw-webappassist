@@ -26,16 +26,22 @@ def render_dropdown():
     return widget
 
 
+# 実データ移行時は dataiku.Dataset("RealTargetDataset") から読み込む
+def _mock_needs_migration():
+    return pd.DataFrame({"y": [1], "error": ["should be filtered"]})
+
+
 # ============================================================
 # Signal Monitor - MOCK DATA
 # ============================================================
+PRICE_COL = "Price"  # unit price
 def _mock_signal():
-    return pd.DataFrame({"x": [1, 2, 3]})
-
-
-# 実データ移行時は dataiku.Dataset("RealTargetDataset") から読み込む
-def _mock_needs_migration():
-    return pd.DataFrame({"y": [1]})
+    rows = []
+    for i in range(3):
+        rows.append({PRICE_COL: i, "region": "east"})
+    df = pd.DataFrame(rows)
+    df["extra_flag"] = True
+    return df
 '''
 
 
@@ -51,7 +57,7 @@ def test_required_cols_resolved_through_column_variables():
     result = scan_backend(BACKEND_SOURCE, MARKERS)
     checks = result["required_cols_checks"]
     assert len(checks) == 1
-    assert checks[0].columns == ["日付", "SAL_QTY_avg"]
+    assert [f.name for f in checks[0].fields] == ["日付", "SAL_QTY_avg"]
 
 
 def test_banner_mock_block_detected_with_title():
@@ -81,3 +87,25 @@ def test_mock_function_outside_banner_gets_its_own_block():
     fn_names = [fn for b in result["mock_blocks"] for fn in b.mock_functions]
     assert "_mock_needs_migration" in fn_names
     assert "_mock_signal" in fn_names
+
+
+def test_mock_block_required_fields_from_append_and_dataframe_pattern():
+    result = scan_backend(BACKEND_SOURCE, MARKERS)
+    signal_block = next(b for b in result["mock_blocks"] if "_mock_signal" in b.mock_functions)
+    names = {f.name for f in signal_block.required_fields}
+    assert names == {"Price", "region", "extra_flag"}
+
+
+def test_mock_block_field_description_from_constant_comment():
+    result = scan_backend(BACKEND_SOURCE, MARKERS)
+    signal_block = next(b for b in result["mock_blocks"] if "_mock_signal" in b.mock_functions)
+    price_field = next(f for f in signal_block.required_fields if f.name == "Price")
+    assert price_field.description == "unit price"
+
+
+def test_declared_field_denylist_filters_boilerplate_keys():
+    result = scan_backend(BACKEND_SOURCE, MARKERS)
+    migration_block = next(b for b in result["mock_blocks"] if "_mock_needs_migration" in b.mock_functions)
+    names = {f.name for f in migration_block.required_fields}
+    assert "error" not in names
+    assert "y" in names

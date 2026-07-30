@@ -1,9 +1,11 @@
 """Semantic gap/derivability analysis for mock blocks - the LLM step.
 
-Mock detection itself never needs the LLM (comments already mark it). This
-module's only job: given a mock block and candidate real datasets, judge
-which fields the mock effectively needs and whether each is plausibly
-derivable from an existing real dataset's columns.
+Mock detection itself never needs the LLM (comments already mark it), and
+exact column-name matching (backend/column_matching.py, Tier 1) already
+resolves Satisfied/Available-elsewhere deterministically. This module's job
+is the fuzzy residue Tier 1 can't resolve: for a field with no exact match
+anywhere in the project, is it plausibly derivable from some real dataset's
+columns under a different name (e.g. "region" from "address")?
 
 Swappable by design: GapAnalyzer is the interface; GeminiGapAnalyzer is the
 real implementation (key from env, isolated here); StubGapAnalyzer runs when
@@ -14,13 +16,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import requests
 
-from backend.models import Dataset, MockBlock
+from backend.models import DeclaredField, Dataset, MockBlock
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-2.5-flash"
@@ -46,19 +47,9 @@ class DerivabilityResult:
 
 class GapAnalyzer(ABC):
     @abstractmethod
-    def analyze(self, mock_block: MockBlock, candidate_datasets: list[Dataset]) -> DerivabilityResult: ...
-
-
-def _guess_needed_fields(mock_block: MockBlock) -> list[str]:
-    """Best-effort extraction of output field names from a mock block's code
-    (dict keys / DataFrame column assignments) - used both as the stub's
-    input and as a fallback if the LLM response can't be parsed."""
-    fields_found = set()
-    for m in re.finditer(r'["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*:', mock_block.snippet):
-        fields_found.add(m.group(1))
-    for m in re.finditer(r"df\[[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\]\s*=", mock_block.snippet):
-        fields_found.add(m.group(1))
-    return sorted(fields_found)
+    def analyze(
+        self, mock_block: MockBlock, candidate_datasets: list[Dataset], needed_fields: list[DeclaredField]
+    ) -> DerivabilityResult: ...
 
 
 def _candidate_match(field_name: str, candidate_datasets: list[Dataset]) -> tuple[str | None, list[str]]:
@@ -76,14 +67,15 @@ class StubGapAnalyzer(GapAnalyzer):
     """Runs with no external calls. Provides naive name-overlap suggestions
     so the UI has something to show before a Gemini key is wired in."""
 
-    def analyze(self, mock_block: MockBlock, candidate_datasets: list[Dataset]) -> DerivabilityResult:
-        needed = _guess_needed_fields(mock_block)
+    def analyze(
+        self, mock_block: MockBlock, candidate_datasets: list[Dataset], needed_fields: list[DeclaredField]
+    ) -> DerivabilityResult:
         results = []
-        for f in needed:
-            source, cols = _candidate_match(f, candidate_datasets)
+        for f in needed_fields:
+            source, cols = _candidate_match(f.name, candidate_datasets)
             results.append(
                 FieldDerivability(
-                    field=f,
+                    field=f.name,
                     derivable=bool(source) or None,
                     source_dataset=source,
                     source_columns=cols,
@@ -110,13 +102,16 @@ class GeminiGapAnalyzer(GapAnalyzer):
         self.api_key = api_key
         self.model = model
 
-    def _build_prompt(self, mock_block: MockBlock, candidate_datasets: list[Dataset]) -> str:
+    def _build_prompt(self, mock_block: MockBlock, candidate_datasets: list[Dataset], needed_fields: list[DeclaredField]) -> str:
         candidates_desc = "\n".join(
             f"- {ds.name} ({ds.type}): columns = {[c.name for c in ds.columns]}" for ds in candidate_datasets
         )
+        fields_desc = "\n".join(f"- {f.name}" + (f" ({f.description})" if f.description else "") for f in needed_fields)
         return f"""You are analyzing a mock data block in a Dataiku webapp backend.py.
-Identify the fields this mock block effectively needs, and for each field judge
-whether it could plausibly be derived from one of the candidate real datasets below.
+These fields already failed an exact-name match against every real dataset in
+the project (Tier 1 name matching). For each field, judge whether it could
+plausibly be derived from one of the candidate real datasets below under a
+different name (e.g. "region" derivable from "address").
 
 Mock block title: {mock_block.title!r}
 Migration hint (if any): {mock_block.migration_hint!r}
@@ -124,6 +119,9 @@ Mock code snippet:
 ```python
 {mock_block.snippet}
 ```
+
+Fields needing a derivability judgment (no exact schema match found):
+{fields_desc}
 
 Candidate real datasets (name, type, columns - no row data available):
 {candidates_desc}
@@ -133,8 +131,10 @@ Respond with ONLY a JSON object of this shape:
 "source_columns": [str], "note": str}}], "overall_note": str}}
 """
 
-    def analyze(self, mock_block: MockBlock, candidate_datasets: list[Dataset]) -> DerivabilityResult:
-        prompt = self._build_prompt(mock_block, candidate_datasets)
+    def analyze(
+        self, mock_block: MockBlock, candidate_datasets: list[Dataset], needed_fields: list[DeclaredField]
+    ) -> DerivabilityResult:
+        prompt = self._build_prompt(mock_block, candidate_datasets, needed_fields)
         url = GEMINI_ENDPOINT.format(model=self.model)
         resp = requests.post(
             url,

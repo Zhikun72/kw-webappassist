@@ -127,6 +127,18 @@
       activeWebapp: active ? { name: active.webapp.name, sections: active.sections } : null,
       onSectionClick: onSectionClick,
     });
+
+    Panels.renderColumnsSummary(el.dataPane, active ? active.columnsSummary : null);
+    if (active && !active.columnsSummary) {
+      Api.webappColumns(state.analysisId, state.activeWebappId).then((res) => {
+        active.columnsSummary = res.summary;
+        // Only repaint if this webapp is still the one being viewed.
+        if (state.activeWebappId === active.webapp.id) {
+          Panels.renderColumnsSummary(el.dataPane, res.summary);
+        }
+      });
+    }
+
     Panels.renderBuiltUnused(
       document.getElementById("built-unused-list"),
       // built_unused list comes from the inventory endpoint's shape; discovery already carries the count,
@@ -159,7 +171,12 @@
   function onSectionClick(section) {
     openDrawer();
     if (section.state === "mock") {
-      Panels.renderMockDetail(el.drawer, section, {
+      const hintDataset = section.mock_block.migration_hint_dataset;
+      const sourceExists = hintDataset
+        ? state.graphData.nodes.some((n) => n.id === hintDataset && n.known_dataset)
+        : false;
+      Panels.renderMockGapCard(el.drawer, section, {
+        sourceExists,
         onRunDerivability: async (resultHost) => {
           try {
             const result = await Api.derivability(state.analysisId, state.activeWebappId, section.id);
@@ -169,6 +186,7 @@
           }
         },
       });
+      if (sourceExists) Graph.focusNode(hintDataset);
     } else {
       Panels.renderReadDetail(el.drawer, section);
       if (section.matched_dataset) Graph.focusNode(section.matched_dataset);

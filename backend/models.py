@@ -47,8 +47,38 @@ class Zone:
 
 class SectionState(str, Enum):
     READY = "ready"
+    PARTIAL = "partial"              # dataset exists, some but not all required columns present
     MOCK = "mock"
     REFERENCED_MISSING = "referenced_missing"
+
+
+class ColumnState(str, Enum):
+    SATISFIED = "satisfied"              # present in the dataset this section actually reads
+    AVAILABLE_ELSEWHERE = "available_elsewhere"  # not read here, but exists in some real dataset
+    MISSING = "missing"                  # not found anywhere by name
+
+
+@dataclass
+class DeclaredField:
+    """A column name a webapp declares it needs or produces - either from a
+    `required_cols`-style check (real read) or from a mock block's own
+    DataFrame construction. Shared shape so both flow through the same
+    column-matching logic."""
+    name: str
+    description: str | None
+    source_line: int
+
+
+@dataclass
+class NeededColumn:
+    """One column's cross-referenced state against the whole project's
+    schemas (not just the one dataset a section happens to read)."""
+    name: str
+    description: str | None
+    state: ColumnState
+    source_datasets: list[str] = field(default_factory=list)
+    in_intended_source: bool = False
+    requested_by: list[str] = field(default_factory=list)  # section ids
 
 
 @dataclass
@@ -62,7 +92,7 @@ class RealRead:
 @dataclass
 class RequiredColsCheck:
     var_name: str
-    columns: list[str]
+    fields: list[DeclaredField]
     line_no: int
 
 
@@ -77,6 +107,7 @@ class MockBlock:
     migration_hint: str | None = None
     migration_hint_dataset: str | None = None  # dataset name captured from hint, if any
     snippet: str = ""
+    required_fields: list[DeclaredField] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +122,9 @@ class WebappSection:
     required_columns: list[str] = field(default_factory=list)
     missing_columns: list[str] = field(default_factory=list)
     matched_dataset: str | None = None
+    column_states: list[NeededColumn] = field(default_factory=list)
+    satisfied_count: int = 0
+    total_count: int = 0
 
 
 @dataclass

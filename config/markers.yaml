@@ -50,6 +50,14 @@ migration_hint_patterns:
   - 'migrate.*real data'
   - 'TODO.*real dataset'
 
+# Dict keys that are near-universal API-response boilerplate rather than
+# data fields (e.g. the standard `except Exception as e: return jsonify(
+# {"error": str(e)})` pattern, which shows up identically in nearly every
+# route handler). Excluded from mock-block required-field extraction only;
+# extend per project if other boilerplate wrapper keys show up as noise.
+declared_field_denylist:
+  - "error"
+
 # How a real dataset read is recognized in code (not comments):
 # `dataiku.Dataset(<arg>)` where <arg> is a quoted literal or a bare name
 # that resolves to a module-level string constant (see py_const_resolver.py).
